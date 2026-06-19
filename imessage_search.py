@@ -20,13 +20,15 @@ USAGE:
   imessage-search text   "<substring>" [limit] [--all]   # search message bodies (recent-first)
   imessage-search handle "<phone/email>" [limit]         # all messages with one handle
   imessage-search recent [limit]                         # most recent messages, all chats
+  imessage-search unread [limit] [days]                  # recent unread incoming (default 25, last 14 days)
+  imessage-search chat   "<chat id / room>" [limit]      # messages in a group thread (by chat_identifier)
   imessage-search contacts "<name>"                      # name -> phone/email (all sources)
 Defaults: limit 40. `text` scans newest-first up to 80000 rows; pass --all to scan everything.
 
 PREREQUISITE: the process running this needs macOS Full Disk Access (System Settings >
 Privacy & Security > Full Disk Access). See README / AGENTS.md.
 """
-import sqlite3, os, sys, glob, re
+import sqlite3, os, sys, glob, re, time
 
 HOME = os.path.expanduser("~")
 CHATDB = f"file:{HOME}/Library/Messages/chat.db?mode=ro"   # ro: WAL-safe, reflects in-flight messages
@@ -203,6 +205,32 @@ def main():
         for date, fromme, text, blob, hid in con.execute(
                 base + "AND h.id LIKE ? ORDER BY m.date DESC LIMIT ?", (f"%{h}%", limit)):
             print(fmt(date, hid, fromme, decode_body(text, blob), contacts))
+        return
+
+    if cmd == "unread":
+        rest = [a for a in args[1:] if not a.startswith("--")]
+        limit = parse_limit(rest[0] if len(rest) > 0 else None, 25)
+        days = parse_limit(rest[1] if len(rest) > 1 else None, 14)
+        cutoff = int((time.time() - days * 86400 - 978307200) * 1_000_000_000)   # ns-since-2001 boundary
+        for date, fromme, text, blob, h in con.execute(
+                base + "AND m.is_from_me=0 AND m.is_read=0 AND m.date > ? ORDER BY m.date DESC LIMIT ?",
+                (cutoff, limit)):
+            print(fmt(date, h, fromme, decode_body(text, blob), contacts))
+        return
+
+    if cmd == "chat":
+        ident = args[1] if len(args) > 1 else sys.exit("need a chat identifier (chat_identifier / room name)")
+        limit = parse_limit(args[2] if len(args) > 2 else None)
+        for date, fromme, text, blob, h in con.execute(
+                "SELECT m.date, m.is_from_me, m.text, m.attributedBody, h.id "
+                "FROM message m JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
+                "JOIN chat ch ON ch.ROWID = cmj.chat_id "
+                "LEFT JOIN handle h ON m.handle_id = h.ROWID "
+                "WHERE COALESCE(m.associated_message_type,0)=0 "
+                "AND (ch.chat_identifier = ? OR ch.room_name = ? OR ch.guid LIKE ?) "
+                "ORDER BY m.date DESC LIMIT ?",
+                (ident, ident, f"%{ident}%", limit)):
+            print(fmt(date, h, fromme, decode_body(text, blob), contacts))
         return
 
     if cmd == "text":
