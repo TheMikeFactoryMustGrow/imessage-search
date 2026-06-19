@@ -13,7 +13,7 @@ naive `SELECT text` would silently miss the large majority of recent messages, b
 
 ## Install
 ```bash
-git clone https://github.com/<owner>/imessage-search.git
+git clone https://github.com/TheMikeFactoryMustGrow/imessage-search.git
 cd imessage-search
 bash install.sh
 ```
@@ -54,6 +54,11 @@ Output: `YYYY-MM-DD HH:MM  <name or handle>  <message text>`.
 Read-only and local by design — it cannot send messages and writes nothing. But it can read your
 **entire** message history, so treat the output as sensitive: use it with a **local** agent, and
 don't pipe your message history to a cloud-hosted model or external service.
+
+## Limitations (by design — it's a small tool)
+- `handle` matches any handle **containing** the string you pass (substring), so a full number returns one person but a short fragment can mix several. Pass a complete phone/email for a single thread.
+- `text` decodes message bodies in Python as it scans, so a search with few/no hits walks the newest 80,000 messages (a few seconds); `--all` scans the whole history (can take longer on a large database).
+- A small fraction (<1%) of received group/legacy messages have no stored handle and show the sender as `?`.
 
 ## Requirements
 macOS, Python 3.9+. That's it.

@@ -21,8 +21,12 @@ command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not found. Install 
 mkdir -p "$DATA" "$BIN"
 cp "$SRC/imessage_search.py" "$DATA/imessage_search.py"
 [[ -d "$VENV" ]] || python3 -m venv "$VENV"
-"$VENV/bin/pip" install --quiet --upgrade pip >/dev/null
-"$VENV/bin/pip" install --quiet pytypedstream >/dev/null
+"$VENV/bin/pip" install --quiet --upgrade pip >/dev/null 2>&1 || true
+if ! "$VENV/bin/pip" install --quiet pytypedstream >/dev/null; then
+  echo "ERROR: could not install pytypedstream (network / proxy / PyPI unreachable?)." >&2
+  echo "       Restore connectivity and re-run: bash install.sh" >&2
+  exit 1
+fi
 echo "    venv + pytypedstream ready at $VENV"
 
 # 3. Launcher on PATH

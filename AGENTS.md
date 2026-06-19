@@ -44,7 +44,7 @@ it (or call the launcher by full path).
 ```bash
 imessage-search recent [limit]                 # most recent messages, all chats
 imessage-search text   "<substring>" [limit]   # full-text search of bodies (newest-first; --all = whole history)
-imessage-search handle "<phone/email>" [limit] # one person's thread
+imessage-search handle "<phone/email>" [limit] # messages whose handle contains this (use a full number for one person)
 imessage-search contacts "<name>"              # resolve a name -> phone/email
 ```
 Defaults: limit 40. `text` scans the newest 80,000 messages unless `--all` is passed.

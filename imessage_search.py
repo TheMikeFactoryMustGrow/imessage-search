@@ -123,14 +123,29 @@ def fmt(date, handle, is_from_me, body, contacts):
     return f"{ts}  {who(handle, is_from_me, contacts):<22.22}  {(body or '').replace(chr(10),' ')}"
 
 
-def connect_chatdb():
-    if not os.path.exists(f"{HOME}/Library/Messages/chat.db"):
-        sys.exit("No ~/Library/Messages/chat.db found — is this a Mac with Messages set up?")
+FDA_HINT = ("Cannot read ~/Library/Messages/chat.db — most likely the app running this lacks "
+            "macOS Full Disk Access:\n"
+            "  System Settings > Privacy & Security > Full Disk Access > add your terminal/host app,\n"
+            "  then fully quit and reopen it.\n"
+            "(If you have never set up Messages on this Mac, the database may not exist yet.)")
+
+
+def parse_limit(v, default=40):
     try:
-        return sqlite3.connect(CHATDB, uri=True)
+        return int(v) if v is not None else default
+    except (TypeError, ValueError):
+        sys.exit(f"limit must be a whole number, got: {v!r}")
+
+
+def connect_chatdb():
+    # Force a real read so a TCC/Full-Disk-Access denial surfaces HERE with an actionable message.
+    # (os.path.exists() is unreliable: when FDA is denied it returns False, masking the real cause.)
+    try:
+        con = sqlite3.connect(CHATDB, uri=True)
+        con.execute("SELECT 1 FROM message LIMIT 1")
+        return con
     except sqlite3.OperationalError:
-        sys.exit("Cannot open ~/Library/Messages/chat.db — grant Full Disk Access to this "
-                 "terminal/host (System Settings > Privacy & Security > Full Disk Access), then retry.")
+        sys.exit(FDA_HINT)
 
 
 def main():
@@ -141,26 +156,33 @@ def main():
 
     if cmd == "contacts":
         name = args[1] if len(args) > 1 else sys.exit("need a name")
-        seen = set()
+        like = f"%{name}%"
+        seen = set(); opened = 0
+        # UNION of phones + emails so a contact with BOTH still shows both (a plain
+        # COALESCE(phone, email) over the join would silently drop the email).
+        q = """
+            SELECT TRIM(COALESCE(r.ZFIRSTNAME,'')||' '||COALESCE(r.ZLASTNAME,'')) name, p.ZFULLNUMBER contact
+            FROM ZABCDRECORD r JOIN ZABCDPHONENUMBER p ON p.ZOWNER=r.Z_PK
+            WHERE (r.ZFIRSTNAME LIKE ? OR r.ZLASTNAME LIKE ?) AND p.ZFULLNUMBER IS NOT NULL
+            UNION
+            SELECT TRIM(COALESCE(r.ZFIRSTNAME,'')||' '||COALESCE(r.ZLASTNAME,'')) name, e.ZADDRESS contact
+            FROM ZABCDRECORD r JOIN ZABCDEMAILADDRESS e ON e.ZOWNER=r.Z_PK
+            WHERE (r.ZFIRSTNAME LIKE ? OR r.ZLASTNAME LIKE ?) AND e.ZADDRESS IS NOT NULL"""
         for db in AB_GLOB:
             if not os.path.exists(db):
                 continue
             try:
                 c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-                for n, contact in c.execute("""
-                    SELECT TRIM(COALESCE(r.ZFIRSTNAME,'')||' '||COALESCE(r.ZLASTNAME,'')) name,
-                           COALESCE(p.ZFULLNUMBER, e.ZADDRESS) contact
-                    FROM ZABCDRECORD r
-                    LEFT JOIN ZABCDPHONENUMBER p ON p.ZOWNER=r.Z_PK
-                    LEFT JOIN ZABCDEMAILADDRESS e ON e.ZOWNER=r.Z_PK
-                    WHERE (r.ZFIRSTNAME LIKE ? OR r.ZLASTNAME LIKE ?)
-                      AND COALESCE(p.ZFULLNUMBER,e.ZADDRESS) IS NOT NULL""",
-                    (f"%{name}%", f"%{name}%")):
+                rows = c.execute(q, (like, like, like, like)).fetchall()
+                opened += 1
+                for n, contact in rows:
                     if (n, contact) not in seen:
                         seen.add((n, contact)); print(f"{n}\t{contact}")
                 c.close()
             except sqlite3.Error:
                 continue
+        if opened == 0:                      # every AddressBook source was unreadable -> almost certainly FDA
+            sys.exit(FDA_HINT)
         return
 
     con = connect_chatdb()
@@ -170,14 +192,14 @@ def main():
             "WHERE COALESCE(m.associated_message_type,0) = 0 ")  # exclude tapbacks/reactions
 
     if cmd == "recent":
-        limit = int(args[1]) if len(args) > 1 else 40
+        limit = parse_limit(args[1] if len(args) > 1 else None)
         for date, fromme, text, blob, h in con.execute(base + "ORDER BY m.date DESC LIMIT ?", (limit,)):
             print(fmt(date, h, fromme, decode_body(text, blob), contacts))
         return
 
     if cmd == "handle":
         h = args[1] if len(args) > 1 else sys.exit("need a phone/email")
-        limit = int(args[2]) if len(args) > 2 else 40
+        limit = parse_limit(args[2] if len(args) > 2 else None)
         for date, fromme, text, blob, hid in con.execute(
                 base + "AND h.id LIKE ? ORDER BY m.date DESC LIMIT ?", (f"%{h}%", limit)):
             print(fmt(date, hid, fromme, decode_body(text, blob), contacts))
@@ -185,9 +207,10 @@ def main():
 
     if cmd == "text":
         term = (args[1] if len(args) > 1 else sys.exit("need a search term")).lower()
-        rest = [a for a in args[2:] if not a.startswith("--")]
-        limit = int(rest[0]) if rest else 40
-        scan_cap = 10**9 if "--all" in args else 80000
+        flags = args[2:]
+        rest = [a for a in flags if not a.startswith("--")]
+        limit = parse_limit(rest[0] if rest else None)
+        scan_cap = 10**9 if "--all" in flags else 80000   # flags only — never mistake the term for --all
         matches = scanned = 0
         for date, fromme, text, blob, h in con.execute(base + "ORDER BY m.date DESC"):
             scanned += 1
@@ -195,10 +218,10 @@ def main():
                 break
             body = decode_body(text, blob)
             if body and term in body.lower():
+                if matches >= limit:                      # check before printing so limit 0 yields 0 rows
+                    break
                 print(fmt(date, h, fromme, body, contacts))
                 matches += 1
-                if matches >= limit:
-                    break
         if scanned >= scan_cap and matches < limit:
             print(f"\n[scanned {scan_cap} newest messages; pass --all to search older history]",
                   file=sys.stderr)
