@@ -43,6 +43,8 @@ imessage-search contacts "Alex"            # resolve a name -> phone/email
 ```
 Output: `YYYY-MM-DD HH:MM  <name or handle>  <message text>`.
 
+Add `-v` (info) or `-vv` (debug) for operational logs on **stderr** — command, result counts, contact-index size, decode/source failures (or set `IMESSAGE_SEARCH_LOG=DEBUG`). stdout stays results-only, and logs never contain message text, search terms, or contact details.
+
 ## What it handles correctly
 - `attributedBody` typedstream decoding (the modern message-text location)
 - Apple's nanoseconds-since-2001 timestamps

@@ -5,6 +5,7 @@ macOS NSArchiver and embedded as base64 so the suite has no PyObjC dependency an
 private message content. chat.db / AddressBook are built fresh per test in tmp_path.
 """
 import base64
+import logging
 import re
 import sqlite3
 import sys
@@ -348,3 +349,85 @@ def test_main_contacts_unreadable_sources_hint(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as e:
         run_main(monkeypatch, "contacts", "Lindsay")
     assert "Full Disk Access" in str(e.value)
+
+
+# --- logging --------------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _clean_log_env(monkeypatch):
+    # Keep level resolution hermetic regardless of the runner's environment.
+    monkeypatch.delenv("IMESSAGE_SEARCH_LOG", raising=False)
+
+
+def test_resolve_log_level_flags_and_default():
+    a = ["-v", "recent"]
+    assert m._resolve_log_level(a) == logging.INFO
+    assert a == ["recent"]                       # flag popped, command left intact
+    assert m._resolve_log_level(["-vv"]) == logging.DEBUG
+    assert m._resolve_log_level(["--debug"]) == logging.DEBUG
+    assert m._resolve_log_level(["-q"]) == logging.ERROR
+    assert m._resolve_log_level(["recent"]) == logging.WARNING   # no flag -> default
+
+
+def test_resolve_log_level_env_overrides(monkeypatch):
+    monkeypatch.setenv("IMESSAGE_SEARCH_LOG", "debug")
+    assert m._resolve_log_level([]) == logging.DEBUG
+
+
+def test_resolve_log_level_env_invalid_falls_back(monkeypatch):
+    monkeypatch.setenv("IMESSAGE_SEARCH_LOG", "BOGUS")
+    assert m._resolve_log_level([]) == logging.WARNING
+
+
+def test_log_decode_failure(caplog):
+    caplog.set_level(logging.DEBUG, logger="imessage_search")
+    m.decode_body(None, b"\x00\x01\x02\x03")
+    assert any("decode failed" in r.message for r in caplog.records)
+
+
+def test_log_load_contacts_summary_and_unreadable(tmp_path, monkeypatch, caplog):
+    good = tmp_path / "g.abcddb"; build_addressbook(str(good))
+    broken = tmp_path / "b.abcddb"; broken.write_bytes(b"nope")
+    monkeypatch.setattr(m, "AB_GLOB", [str(broken), str(good)])
+    caplog.set_level(logging.DEBUG, logger="imessage_search")
+    m.load_contacts()
+    msgs = [r.message for r in caplog.records]
+    assert any("AddressBook source unreadable" in x for x in msgs)
+    assert any("contacts index:" in x for x in msgs)
+
+
+def test_log_connect_failure(monkeypatch, caplog):
+    monkeypatch.setattr(m, "CHATDB", "file:/nonexistent/x.db?mode=ro")
+    caplog.set_level(logging.DEBUG, logger="imessage_search")
+    with pytest.raises(SystemExit):
+        m.connect_chatdb()
+    assert any("chat.db open/probe failed" in r.message for r in caplog.records)
+
+
+def test_log_run_and_count(chatdb, ab, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG, logger="imessage_search")
+    run_main(monkeypatch, "-vv", "recent", "3")
+    msgs = [r.message for r in caplog.records]
+    assert any("run: recent" in x for x in msgs)
+    assert any("recent: 3 message(s)" in x for x in msgs)
+
+
+def test_log_text_counts(chatdb, ab, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG, logger="imessage_search")
+    run_main(monkeypatch, "-vv", "text", "hello", "10")
+    assert any("text:" in r.message and "match(es)" in r.message for r in caplog.records)
+
+
+def test_log_contacts_no_source(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(m, "AB_GLOB", [str(tmp_path / "missing.abcddb")])
+    caplog.set_level(logging.DEBUG, logger="imessage_search")
+    with pytest.raises(SystemExit):
+        run_main(monkeypatch, "-vv", "contacts", "Lindsay")
+    assert any("no readable AddressBook source" in r.message for r in caplog.records)
+
+
+def test_log_contacts_success(tmp_path, monkeypatch, caplog):
+    good = tmp_path / "g.abcddb"; build_addressbook(str(good))
+    monkeypatch.setattr(m, "AB_GLOB", [str(good)])
+    caplog.set_level(logging.DEBUG, logger="imessage_search")
+    run_main(monkeypatch, "-vv", "contacts", "Lindsay")
+    assert any("contacts:" in r.message and "source(s)" in r.message for r in caplog.records)

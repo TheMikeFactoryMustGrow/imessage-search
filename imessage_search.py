@@ -25,10 +25,14 @@ USAGE:
   imessage-search contacts "<name>"                      # name -> phone/email (all sources)
 Defaults: limit 40. `text` scans newest-first up to 80000 rows; pass --all to scan everything.
 
+LOGGING: add -v (info) / -vv (debug) / -q (errors only), or set IMESSAGE_SEARCH_LOG=DEBUG.
+Logs go to stderr (results stay on stdout) and NEVER include message text, search terms,
+or contact details — only operational facts (commands, counts, byte sizes, errors).
+
 PREREQUISITE: the process running this needs macOS Full Disk Access (System Settings >
 Privacy & Security > Full Disk Access). See README / AGENTS.md.
 """
-import sqlite3, os, sys, glob, re, time
+import sqlite3, os, sys, glob, re, time, logging
 
 HOME = os.path.expanduser("~")
 CHATDB = f"file:{HOME}/Library/Messages/chat.db?mode=ro"   # ro: WAL-safe, reflects in-flight messages
@@ -41,6 +45,32 @@ try:
     import typedstream
 except ImportError:  # pragma: no cover - only when the venv is missing the parser
     sys.exit("typedstream parser missing — re-run install.sh (it builds the venv with pytypedstream).")
+
+# Operational logging only — NEVER message bodies, search terms, or contact PII. stderr, not stdout.
+log = logging.getLogger("imessage_search")
+_LOG_FLAGS = {"-q": logging.ERROR, "--quiet": logging.ERROR,
+              "-v": logging.INFO, "--verbose": logging.INFO,
+              "-vv": logging.DEBUG, "--debug": logging.DEBUG}
+
+
+def _resolve_log_level(args):
+    """Pop any logging flags from args (in place); return the level. IMESSAGE_SEARCH_LOG env wins."""
+    level = logging.WARNING
+    for tok in list(args):
+        if tok in _LOG_FLAGS:
+            level = _LOG_FLAGS[tok]
+            args.remove(tok)
+    env = os.environ.get("IMESSAGE_SEARCH_LOG")
+    if env:
+        level = getattr(logging, env.strip().upper(), level)
+    return level
+
+
+def _setup_logging(level):
+    handler = logging.StreamHandler(sys.stderr)            # stdout stays reserved for results
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    log.handlers[:] = [handler]                            # idempotent across calls
+    log.setLevel(level)
 
 
 def _collect_strings(obj, depth=0, found=None):
@@ -69,7 +99,8 @@ def decode_body(text, blob):
         return None
     try:
         obj = typedstream.unarchive_from_data(blob)
-    except Exception:
+    except Exception as exc:
+        log.debug("attributedBody decode failed (%d bytes): %s", len(blob), exc)
         return None
     for s in _collect_strings(obj):      # NSAttributedString stores the body as the first string
         s = s.replace(OBJ_REPLACEMENT, "").strip()
@@ -92,6 +123,7 @@ def norm_phone(s):
 def load_contacts():
     """Map normalized phone (last 10 digits) and lowercased email -> contact name, across all sources."""
     names = {}
+    opened = 0
     for db in AB_GLOB:
         if not os.path.exists(db):
             continue
@@ -110,8 +142,11 @@ def load_contacts():
                 if email:
                     names.setdefault(email.strip().lower(), name)
             con.close()
-        except sqlite3.Error:
+            opened += 1
+        except sqlite3.Error as exc:
+            log.debug("AddressBook source unreadable (%s): %s", db, exc)
             continue
+    log.info("contacts index: %d key(s) from %d of %d source(s)", len(names), opened, len(AB_GLOB))
     return names
 
 
@@ -151,15 +186,18 @@ def connect_chatdb():
         con = sqlite3.connect(CHATDB, uri=True)
         con.execute("SELECT 1 FROM message LIMIT 1")
         return con
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        log.debug("chat.db open/probe failed: %s", exc)
         sys.exit(FDA_HINT)
 
 
 def main():
     args = sys.argv[1:]
+    _setup_logging(_resolve_log_level(args))
     if not args:
         sys.exit(__doc__)
     cmd = args[0]
+    log.info("run: %s", cmd)
 
     if cmd == "contacts":
         name = args[1] if len(args) > 1 else sys.exit("need a name")
@@ -186,10 +224,13 @@ def main():
                     if (n, contact) not in seen:
                         seen.add((n, contact)); print(f"{n}\t{contact}")
                 c.close()
-            except sqlite3.Error:
+            except sqlite3.Error as exc:
+                log.debug("AddressBook source unreadable (%s): %s", db, exc)
                 continue
         if opened == 0:                      # every AddressBook source was unreadable -> almost certainly FDA
+            log.error("no readable AddressBook source (Full Disk Access?)")
             sys.exit(FDA_HINT)
+        log.info("contacts: %d row(s) from %d source(s)", len(seen), opened)
         return
 
     con = connect_chatdb()
@@ -200,16 +241,20 @@ def main():
 
     if cmd == "recent":
         limit = parse_limit(args[1] if len(args) > 1 else None)
+        n = 0
         for date, fromme, text, blob, h in con.execute(base + "ORDER BY m.date DESC LIMIT ?", (limit,)):
-            print(fmt(date, h, fromme, decode_body(text, blob), contacts))
+            print(fmt(date, h, fromme, decode_body(text, blob), contacts)); n += 1
+        log.info("recent: %d message(s)", n)
         return
 
     if cmd == "handle":
         h = args[1] if len(args) > 1 else sys.exit("need a phone/email")
         limit = parse_limit(args[2] if len(args) > 2 else None)
+        n = 0
         for date, fromme, text, blob, hid in con.execute(
                 base + "AND h.id LIKE ? ORDER BY m.date DESC LIMIT ?", (f"%{h}%", limit)):
-            print(fmt(date, hid, fromme, decode_body(text, blob), contacts))
+            print(fmt(date, hid, fromme, decode_body(text, blob), contacts)); n += 1
+        log.info("handle: %d message(s)", n)
         return
 
     if cmd == "unread":
@@ -217,15 +262,18 @@ def main():
         limit = parse_limit(rest[0] if len(rest) > 0 else None, 25)
         days = parse_limit(rest[1] if len(rest) > 1 else None, 14)
         cutoff = int((time.time() - days * 86400 - 978307200) * 1_000_000_000)   # ns-since-2001 boundary
+        n = 0
         for date, fromme, text, blob, h in con.execute(
                 base + "AND m.is_from_me=0 AND m.is_read=0 AND m.date > ? ORDER BY m.date DESC LIMIT ?",
                 (cutoff, limit)):
-            print(fmt(date, h, fromme, decode_body(text, blob), contacts))
+            print(fmt(date, h, fromme, decode_body(text, blob), contacts)); n += 1
+        log.info("unread: %d message(s) within %dd", n, days)
         return
 
     if cmd == "chat":
         ident = args[1] if len(args) > 1 else sys.exit("need a chat identifier (chat_identifier / room name)")
         limit = parse_limit(args[2] if len(args) > 2 else None)
+        n = 0
         for date, fromme, text, blob, h in con.execute(
                 "SELECT m.date, m.is_from_me, m.text, m.attributedBody, h.id "
                 "FROM message m JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
@@ -235,7 +283,8 @@ def main():
                 "AND (ch.chat_identifier = ? OR ch.room_name = ? OR ch.guid LIKE ?) "
                 "ORDER BY m.date DESC LIMIT ?",
                 (ident, ident, f"%{ident}%", limit)):
-            print(fmt(date, h, fromme, decode_body(text, blob), contacts))
+            print(fmt(date, h, fromme, decode_body(text, blob), contacts)); n += 1
+        log.info("chat: %d message(s)", n)
         return
 
     if cmd == "text":
@@ -258,6 +307,7 @@ def main():
         if scanned >= scan_cap and matches < limit:
             print(f"\n[scanned {scan_cap} newest messages; pass --all to search older history]",
                   file=sys.stderr)
+        log.info("text: %d match(es) in %d scanned (cap=%d)", matches, scanned, scan_cap)
         return
 
     sys.exit(__doc__)
