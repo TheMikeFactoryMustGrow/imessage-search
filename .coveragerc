@@ -1,0 +1,9 @@
+[run]
+branch = True
+source = imessage_search
+
+[report]
+show_missing = True
+fail_under = 100
+exclude_also =
+    if __name__ == .__main__.:

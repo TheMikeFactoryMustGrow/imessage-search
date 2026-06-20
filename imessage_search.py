@@ -35,11 +35,30 @@ CHATDB = f"file:{HOME}/Library/Messages/chat.db?mode=ro"   # ro: WAL-safe, refle
 AB_GLOB = [f"{HOME}/Library/Application Support/AddressBook/AddressBook-v22.abcddb",
            *glob.glob(f"{HOME}/Library/Application Support/AddressBook/Sources/*/AddressBook-v22.abcddb")]
 OBJ_REPLACEMENT = "￼"  # attachment placeholder char
+TEXT_SCAN_CAP = 80000  # `text` decodes bodies in Python as it scans; cap to newest-N unless --all
 
 try:
     import typedstream
-except ImportError:
+except ImportError:  # pragma: no cover - only when the venv is missing the parser
     sys.exit("typedstream parser missing — re-run install.sh (it builds the venv with pytypedstream).")
+
+
+def _collect_strings(obj, depth=0, found=None):
+    """Recursively gather every string in an unarchived typedstream object graph."""
+    if found is None:
+        found = []
+    if depth > 6:                        # defensive recursion guard (cyclic/pathological graphs)
+        return found
+    if isinstance(obj, str):
+        found.append(obj)
+    elif isinstance(obj, (list, tuple)):
+        for i in obj:
+            _collect_strings(i, depth + 1, found)
+    else:
+        for attr in ("value", "values", "contents"):
+            if hasattr(obj, attr):
+                _collect_strings(getattr(obj, attr), depth + 1, found)
+    return found
 
 
 def decode_body(text, blob):
@@ -52,25 +71,11 @@ def decode_body(text, blob):
         obj = typedstream.unarchive_from_data(blob)
     except Exception:
         return None
-    found = []
-    def walk(x, depth=0):
-        if depth > 6:
-            return
-        if isinstance(x, str):
-            found.append(x)
-        elif isinstance(x, (list, tuple)):
-            for i in x:
-                walk(i, depth + 1)
-        else:
-            for attr in ("value", "values", "contents"):
-                if hasattr(x, attr):
-                    walk(getattr(x, attr), depth + 1)
-    walk(obj)
-    for s in found:                      # NSAttributedString stores the body as the first string
+    for s in _collect_strings(obj):      # NSAttributedString stores the body as the first string
         s = s.replace(OBJ_REPLACEMENT, "").strip()
         if s:
             return s
-    return "[attachment]" if found or blob else None
+    return "[attachment]"                # decoded, but no usable text (e.g. attachment-only)
 
 
 def apple_ts(date):
@@ -238,7 +243,7 @@ def main():
         flags = args[2:]
         rest = [a for a in flags if not a.startswith("--")]
         limit = parse_limit(rest[0] if rest else None)
-        scan_cap = 10**9 if "--all" in flags else 80000   # flags only — never mistake the term for --all
+        scan_cap = 10**9 if "--all" in flags else TEXT_SCAN_CAP   # flags only — never mistake the term for --all
         matches = scanned = 0
         for date, fromme, text, blob, h in con.execute(base + "ORDER BY m.date DESC"):
             scanned += 1

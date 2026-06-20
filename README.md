@@ -60,6 +60,16 @@ don't pipe your message history to a cloud-hosted model or external service.
 - `text` decodes message bodies in Python as it scans, so a search with few/no hits walks the newest 80,000 messages (a few seconds); `--all` scans the whole history (can take longer on a large database).
 - A small fraction (<1%) of received group/legacy messages have no stored handle and show the sender as `?`.
 
+## Tests
+Hermetic — no real Messages data, no network, no Full Disk Access required (chat.db and AddressBook
+are built fresh in a temp dir; the `attributedBody` fixtures are real `streamtyped` blobs of synthetic
+text). Run:
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+.venv/bin/coverage run -m pytest && .venv/bin/coverage report -m
+```
+100% line + branch coverage is enforced (`.coveragerc` `fail_under = 100`).
+
 ## Requirements
 macOS, Python 3.9+. That's it.
 
