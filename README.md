@@ -1,84 +1,126 @@
-# imessage-search
+# imessage-search · mail-search · icloud-mail
 
-A tiny, read-only CLI that searches your local macOS iMessage/SMS history by reading
-`~/Library/Messages/chat.db` directly. Built for use with AI coding agents (Claude Code, etc.)
-or straight from your shell. No daemon, no background process, **no send capability**.
+Read-only (by default) macOS CLIs for **iMessage**, **local Apple Mail headers**, and **iCloud email** (IMAP/SMTP). Built for AI agents and the shell.
 
-## Why
-AppleScript-based iMessage tools are fragile — their macOS Automation grants break on Homebrew
-`node` upgrades, they need the Messages/Contacts apps running, and they often return raw binary
-junk for modern messages. This bypasses all of that with direct SQLite reads, and it correctly
-decodes the `attributedBody` blob where macOS (Ventura and later) stores most message text — so a
-naive `SELECT text` would silently miss the large majority of recent messages, but this won't.
+| Tool | What it talks to | Send? |
+|------|------------------|-------|
+| `imessage-search` | Local `chat.db` | never |
+| `mail-search` | Local Mail Envelope Index (headers) | never |
+| `icloud-mail` | iCloud IMAP + SMTP | **gated** (off by default) |
+
+**No AppleScript. No Mail.app automation.** That path is what hangs Mail; these tools avoid it.
 
 ## Install
+
 ```bash
 git clone https://github.com/TheMikeFactoryMustGrow/imessage-search.git
 cd imessage-search
 bash install.sh
 ```
-Or, with an AI agent: paste this repo's URL and say **"install this"** — the agent reads
-[`AGENTS.md`](AGENTS.md), runs the installer, and tells you the one manual step below.
 
-The installer creates an isolated Python venv (it does **not** touch your system Python),
-installs the [`pytypedstream`](https://pypi.org/project/pytypedstream/) parser, and drops a
-launcher at `~/.local/bin/imessage-search`.
+### Full Disk Access (local tools)
 
-### One manual step: Full Disk Access
-Reading the Messages database requires macOS **Full Disk Access** for whatever app runs the
-command (your terminal, or your Claude host). No installer can grant this — it's a privacy
-permission you toggle yourself:
+For `imessage-search` and `mail-search`:
 
-> **System Settings → Privacy & Security → Full Disk Access → +** → add your terminal (Terminal /
-> iTerm) or Claude host → **fully quit and reopen** that app.
+> System Settings → Privacy & Security → Full Disk Access → add Terminal / Claude / Grok host → quit & reopen.
 
-The installer detects whether the grant is in place and tells you if it isn't.
+### iCloud setup (any person / any Mac)
+
+```bash
+icloud-mail setup
+```
+
+This **opens Apple ID in your browser** (sign in → App-Specific Passwords → Generate) and shows
+**macOS dialogs** for your iCloud email + that password. Credentials go in Keychain +
+`~/.config/icloud-mail/config.json` — never in the repo.
+
+Sharing: paste the repo into Claude or Grok and say **“install this”** — agents follow
+[`AGENTS.md`](AGENTS.md) end-to-end (including the browser setup for whoever is using the Mac).
+
+## Permissions (iCloud)
+
+| Mode | Default | Commands |
+|------|---------|----------|
+| `read` | on | folders, recent, unread, search, read, drafts, auth-check |
+| `draft` | on | draft (IMAP APPEND to Drafts — syncs to all devices) |
+| `send` | **off** | send, send-draft |
+
+Send requires **two gates**:
+
+```bash
+export ICLOUD_MAIL_PERMS=read,draft,send   # gate 1: policy
+icloud-mail send --to a@b.com --subject "Hi" --body "Hello" --allow-send   # gate 2: explicit flag
+```
+
+Without both, send refuses. Check with `icloud-mail perms`.
 
 ## Usage
+
+### iMessage
+
 ```bash
-imessage-search recent 20                  # most recent messages, all chats
-imessage-search text "dinner plans" 40     # full-text search (newest-first; add --all for full history)
-imessage-search handle "+13125551234" 50   # one person's thread
-imessage-search contacts "Alex"            # resolve a name -> phone/email
+imessage-search recent 20
+imessage-search text "dinner" 40
+imessage-search handle "+13125551234" 50
+imessage-search unread 25 14
+imessage-search contacts "Alex"
 ```
-Output: `YYYY-MM-DD HH:MM  <name or handle>  <message text>`.
 
-Add `-v` (info) or `-vv` (debug) for operational logs on **stderr** — command, result counts, contact-index size, decode/source failures (or set `IMESSAGE_SEARCH_LOG=DEBUG`). stdout stays results-only, and logs never contain message text, search terms, or contact details.
+### Local Mail headers (any account Mail has synced)
 
-## What it handles correctly
-- `attributedBody` typedstream decoding (the modern message-text location)
-- Apple's nanoseconds-since-2001 timestamps
-- Tapbacks/reactions filtered out
-- Handle → contact-name resolution across all AddressBook sources (incl. iCloud)
-- WAL-safe read-only access (reflects in-flight messages, never locks the DB)
+```bash
+mail-search recent 20
+mail-search unread 25
+mail-search text "invoice" 40
+mail-search from "stilo" 20
+mail-search account INBOX 30
+mail-search mailboxes
+```
 
-## Privacy & safety
-Read-only and local by design — it cannot send messages and writes nothing. But it can read your
-**entire** message history, so treat the output as sensitive: use it with a **local** agent, and
-don't pipe your message history to a cloud-hosted model or external service.
+### iCloud live mail (bodies + draft + optional send)
 
-## Limitations (by design — it's a small tool)
-- `handle` matches any handle **containing** the string you pass (substring), so a full number returns one person but a short fragment can mix several. Pass a complete phone/email for a single thread.
-- `text` decodes message bodies in Python as it scans, so a search with few/no hits walks the newest 80,000 messages (a few seconds); `--all` scans the whole history (can take longer on a large database).
-- A small fraction (<1%) of received group/legacy messages have no stored handle and show the sender as `?`.
+```bash
+icloud-mail auth-check
+icloud-mail folders
+icloud-mail recent 20
+icloud-mail unread 25
+icloud-mail search "invoice" 40
+icloud-mail read <uid>                 # full body
+icloud-mail drafts 20
+icloud-mail draft --to a@b.com --subject "Hi" --body "Hello"
+# optional:
+# icloud-mail draft --to a@b.com --subject "Hi" --body-file ./msg.txt
+# ICLOUD_MAIL_PERMS=read,draft,send icloud-mail send --to a@b.com --subject "Hi" --body "Hello" --allow-send
+# ICLOUD_MAIL_PERMS=read,draft,send icloud-mail send-draft <uid> --allow-send
+```
+
+## Reliability
+
+- **iMessage / local Mail:** SQLite `mode=ro` + `query_only` + short `busy_timeout`; contact index cached under `~/.cache/imessage-search/`.
+- **iCloud:** stdlib `imaplib` / `smtplib` only; password only via Keychain (`security`); no node MCP required.
+- Logs (`-v` / `-vv`) never print message bodies, search terms, or passwords.
+
+## Privacy
+
+Local tools can expose full history — use with a **local** agent. Treat iCloud drafts/sends as real mail.
 
 ## Tests
-Hermetic — no real Messages data, no network, no Full Disk Access required (chat.db and AddressBook
-are built fresh in a temp dir; the `attributedBody` fixtures are real `streamtyped` blobs of synthetic
-text). Run:
+
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/coverage run -m pytest && .venv/bin/coverage report -m
 ```
-100% line + branch coverage is enforced (`.coveragerc` `fail_under = 100`).
 
-## Requirements
-macOS, Python 3.9+. That's it.
+100% line + branch coverage enforced.
 
 ## Uninstall
+
 ```bash
-rm -f ~/.local/bin/imessage-search && rm -rf ~/.local/share/imessage-search
+rm -f ~/.local/bin/imessage-search ~/.local/bin/mail-search ~/.local/bin/icloud-mail
+rm -rf ~/.local/share/imessage-search ~/.cache/imessage-search
+# optional: security delete-generic-password -a "$USER" -s icloud-mail
 ```
 
 ## License
+
 MIT — see [LICENSE](LICENSE).
