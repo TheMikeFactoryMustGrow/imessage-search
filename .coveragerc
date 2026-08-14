@@ -1,6 +1,9 @@
 [run]
 branch = True
-source = imessage_search
+source =
+    imessage_search
+    mail_search
+    icloud_mail
 
 [report]
 show_missing = True
