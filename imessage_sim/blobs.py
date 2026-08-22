@@ -2,6 +2,8 @@
 
 No private message content. Same corpus as the hermetic unit tests.
 """
+from __future__ import annotations
+
 import base64
 
 _B64 = {
@@ -23,3 +25,19 @@ OBJ_REPLACEMENT = "￼"
 
 def blob(key: str) -> bytes:
     return base64.b64decode(_B64[key])
+
+
+def archive_attributed(text: str) -> bytes | None:
+    """Mint a real NSArchiver streamtyped blob (macOS + PyObjC only).
+
+    Returns None when Foundation is unavailable so hermetic CI stays green.
+    """
+    try:
+        from Foundation import NSArchiver, NSAttributedString  # type: ignore
+    except (ImportError, TypeError, AttributeError):
+        return None
+    s = NSAttributedString.alloc().initWithString_(text)
+    data = NSArchiver.archivedDataWithRootObject_(s)
+    if data is None:
+        return None
+    return bytes(data)

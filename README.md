@@ -124,6 +124,12 @@ python3 -m imessage_sim.run
 
 See `imessage_sim/PROGRAM.md` for the experiment loop.
 
+```bash
+python3 -m imessage_sim.soak --rounds 20          # fake DB, read-only hammer
+python3 -m imessage_sim.soak --live --rounds 100  # real chat.db, still never sends
+imessage-search --snapshot text "dinner" 20       # copy db+WAL first (long scans)
+```
+
 ## Uninstall
 
 ```bash

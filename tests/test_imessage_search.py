@@ -10,6 +10,7 @@ import re
 import sqlite3
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -273,12 +274,66 @@ def test_parse_limit_value_default_and_invalid():
 def test_connect_chatdb_success(chatdb):
     con = m.connect_chatdb()
     assert con.execute("SELECT COUNT(*) FROM message").fetchone()[0] == 7
+    con.close()
 
 def test_connect_chatdb_failure(monkeypatch):
     monkeypatch.setattr(m, "CHATDB", "file:/nonexistent/definitely-not-here.db?mode=ro")
     with pytest.raises(SystemExit) as e:
         m.connect_chatdb()
     assert "Full Disk Access" in str(e.value)
+
+
+def test_chatdb_fs_path_variants():
+    assert m._chatdb_fs_path()  # default URI
+    old = m.CHATDB
+    try:
+        m.CHATDB = "file:///tmp/x.db?mode=ro"
+        assert m._chatdb_fs_path() == "/tmp/x.db"
+        m.CHATDB = "file://tmp/y.db?mode=ro"
+        assert "y.db" in m._chatdb_fs_path()
+        m.CHATDB = "/abs/z.db"
+        assert m._chatdb_fs_path() == "/abs/z.db"
+    finally:
+        m.CHATDB = old
+
+
+def test_snapshot_copy_and_conn(chatdb, ab, monkeypatch, capsys):
+    run_main(monkeypatch, "--snapshot", "recent", "2")
+    out = capsys.readouterr().out
+    assert len(out.strip().splitlines()) >= 1
+
+
+def test_copy_sqlite_snapshot_wal(tmp_path, chatdb):
+    dest = tmp_path / "snap"
+    dest.mkdir()
+    wal = Path(str(chatdb) + "-wal")
+    wal.write_bytes(b"x")
+    out = m.copy_sqlite_snapshot(str(chatdb), str(dest))
+    assert Path(out).exists()
+    assert Path(out + "-wal").exists()
+
+
+def test_connect_snapshot_copy_fail(monkeypatch):
+    monkeypatch.setattr(m, "CHATDB", "file:/no/such/chat.db?mode=ro")
+    with pytest.raises(SystemExit) as e:
+        m.connect_chatdb(snapshot=True)
+    assert "Full Disk Access" in str(e.value)
+
+
+def test_connect_snapshot_open_fail(chatdb, monkeypatch):
+    monkeypatch.setattr(m, "CHATDB", f"file:{chatdb}?mode=ro")
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(m, "open_readonly", boom)
+    with pytest.raises(SystemExit) as e:
+        m.connect_chatdb(snapshot=True)
+    assert "Full Disk Access" in str(e.value)
+
+
+def test_type_where_and_msg_select():
+    assert "date_retracted" in m.type_where(False)
+    assert "date_retracted" not in m.type_where(True)
+    assert "CASE WHEN" in m.msg_select()
 
 
 # --- load_contacts ---------------------------------------------------------------------------

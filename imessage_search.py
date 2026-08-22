@@ -31,6 +31,7 @@ USAGE:
   imessage-search contacts "<name>"                      # name -> phone/email (all sources)
 Defaults: limit 40. `text` scans newest-first up to 80000 rows; pass --all to scan everything.
 Edited messages append " (edited)". Unsent/retracted rows are hidden; pass --include-unsent to list them as [unsent] (original body is never printed).
+`--snapshot` copies chat.db (+ WAL) to a temp dir before querying so a long `text` scan never holds the live file. Default `recent` stays on the live read-only URI (fast).
 
 LOGGING: add -v (info) / -vv (debug) / -q (errors only), or set IMESSAGE_SEARCH_LOG=DEBUG.
 Logs go to stderr (results stay on stdout) and NEVER include message text, search terms,
@@ -47,7 +48,9 @@ import glob
 import re
 import time
 import logging
-from contextlib import closing
+import shutil
+import tempfile
+from contextlib import closing, contextmanager
 
 HOME = os.path.expanduser("~")
 CHATDB_PATH = f"{HOME}/Library/Messages/chat.db"
@@ -59,6 +62,9 @@ TEXT_SCAN_CAP = 80000  # `text` decodes bodies in Python as it scans; cap to new
 CACHE_DIR = os.path.join(HOME, ".cache", "imessage-search")
 CONTACTS_CACHE = os.path.join(CACHE_DIR, "contacts-v1.json")
 BUSY_TIMEOUT_MS = 1000
+# sqlite3.Connection on 3.9 rejects arbitrary attributes — keep snap dirs here.
+_SNAP_DIRS = {}
+
 
 try:
     import typedstream
@@ -265,7 +271,7 @@ def _is_retracted(val):
 def emit(date, handle, is_from_me, text, blob, contacts, edited, retracted, include_unsent):
     """Print one row. Returns True if printed. Retracted rows are hidden unless include_unsent."""
     if _is_retracted(retracted) and not include_unsent:
-        return False
+        return False  # pragma: no cover - type_where already drops these
     print(fmt(date, handle, is_from_me, decode_body(text, blob), contacts,
               edited=_is_retracted(edited) and not _is_retracted(retracted),
               unsent=_is_retracted(retracted)))
@@ -286,16 +292,84 @@ def parse_limit(v, default=40):
         sys.exit(f"limit must be a whole number, got: {v!r}")
 
 
-def connect_chatdb():
+def _chatdb_fs_path():
+    """Filesystem path of the Messages DB from CHATDB URI or CHATDB_PATH."""
+    uri = CHATDB
+    if uri.startswith("file:"):
+        rest = uri[5:]
+        if rest.startswith("///"):
+            rest = rest[2:]  # file:///Users/... -> /Users/...
+        elif rest.startswith("//"):
+            rest = rest[1:]
+        return rest.split("?", 1)[0]
+    return uri
+
+
+def copy_sqlite_snapshot(src_path, dest_dir):
+    """Copy db + WAL + SHM into dest_dir/chat.db. Returns dest path."""
+    dest = os.path.join(dest_dir, "chat.db")
+    shutil.copy2(src_path, dest)
+    n_extra = 0
+    for sfx in ("-wal", "-shm"):
+        p = src_path + sfx
+        if os.path.exists(p):
+            shutil.copy2(p, dest + sfx)
+            n_extra += 1
+    log.info("snapshot: copied chat.db (+%d wal/shm sidecar(s))", n_extra)
+    return dest
+
+
+def connect_chatdb(*, snapshot=False):
     # Force a real read so a TCC/Full-Disk-Access denial surfaces HERE with an actionable message.
     # (os.path.exists() is unreliable: when FDA is denied it returns False, masking the real cause.)
+    tmp = None
+    uri = CHATDB
+    if snapshot:
+        src = _chatdb_fs_path()
+        tmp = tempfile.mkdtemp(prefix="imessage-snap-")
+        try:
+            dest = copy_sqlite_snapshot(src, tmp)
+        except OSError as exc:
+            shutil.rmtree(tmp, ignore_errors=True)
+            log.debug("snapshot copy failed: %s", exc)
+            sys.exit(FDA_HINT)
+        uri = f"file:{dest}?mode=ro"
     try:
-        con = open_readonly(CHATDB, uri=True)
+        con = open_readonly(uri, uri=True)
         con.execute("SELECT 1 FROM message LIMIT 1")
+        _SNAP_DIRS[id(con)] = tmp
         return con
     except sqlite3.OperationalError as exc:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
         log.debug("chat.db open/probe failed: %s", exc)
         sys.exit(FDA_HINT)
+
+
+@contextmanager
+def chatdb_conn(*, snapshot=False):
+    con = connect_chatdb(snapshot=snapshot)
+    try:
+        yield con
+    finally:
+        tmp = _SNAP_DIRS.pop(id(con), None)
+        con.close()
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def msg_select():
+    """Fetch attributedBody only when the text column is empty — skip blob I/O on cheap rows."""
+    return ("SELECT m.date, m.is_from_me, m.text, "
+            "CASE WHEN m.text IS NULL OR m.text = '' THEN m.attributedBody END, "
+            "h.id, m.date_edited, m.date_retracted ")
+
+
+def type_where(include_unsent):
+    q = "WHERE COALESCE(m.associated_message_type,0) = 0 "
+    if not include_unsent:
+        q += "AND COALESCE(m.date_retracted,0) = 0 "
+    return q
 
 
 def main():
@@ -305,6 +379,12 @@ def main():
     if "--include-unsent" in args:
         args.remove("--include-unsent")
         include_unsent = True
+    snapshot = False
+    if "--snapshot" in args:
+        args.remove("--snapshot")
+        snapshot = True
+    if os.environ.get("IMESSAGE_SEARCH_SNAPSHOT") == "1":
+        snapshot = True
     if not args:
         sys.exit(__doc__)
     cmd = args[0]
@@ -345,14 +425,13 @@ def main():
         log.info("contacts: %d row(s) from %d source(s)", len(seen), opened)
         return
 
-    with closing(connect_chatdb()) as con:
+    with chatdb_conn(snapshot=snapshot) as con:
         contacts = load_contacts()
-        # Tapbacks/reactions (type != 0) stay out. Retracted/unsent filtered in emit()
+        # Tapbacks/reactions (type != 0) stay out. Retracted/unsent filtered in SQL
         # unless --include-unsent (then shown as [unsent], never the original body).
-        base = ("SELECT m.date, m.is_from_me, m.text, m.attributedBody, h.id, "
-                "m.date_edited, m.date_retracted "
-                "FROM message m LEFT JOIN handle h ON m.handle_id = h.ROWID "
-                "WHERE COALESCE(m.associated_message_type,0) = 0 ")
+        base = (msg_select() +
+                "FROM message m LEFT JOIN handle h ON m.handle_id = h.ROWID " +
+                type_where(include_unsent))
 
         if cmd == "recent":
             limit = parse_limit(args[1] if len(args) > 1 else None)
@@ -360,10 +439,10 @@ def main():
             # Over-fetch a bit so hidden unsends don't shrink the visible window to 0.
             for date, fromme, text, blob, h, edited, retracted in con.execute(
                     base + "ORDER BY m.date DESC LIMIT ?", (max(limit * 4, limit),)):
-                if emit(date, h, fromme, text, blob, contacts, edited, retracted, include_unsent):
-                    n += 1
-                    if n >= limit:
-                        break
+                emit(date, h, fromme, text, blob, contacts, edited, retracted, include_unsent)
+                n += 1
+                if n >= limit:
+                    break
             log.info("recent: %d message(s)", n)
             return
 
@@ -373,10 +452,10 @@ def main():
             n = 0
             for date, fromme, text, blob, hid, edited, retracted in con.execute(
                     base + "AND h.id LIKE ? ORDER BY m.date DESC LIMIT ?", (f"%{h}%", max(limit * 4, limit))):
-                if emit(date, hid, fromme, text, blob, contacts, edited, retracted, include_unsent):
-                    n += 1
-                    if n >= limit:
-                        break
+                emit(date, hid, fromme, text, blob, contacts, edited, retracted, include_unsent)
+                n += 1
+                if n >= limit:
+                    break
             log.info("handle: %d message(s)", n)
             return
 
@@ -389,10 +468,10 @@ def main():
             for date, fromme, text, blob, h, edited, retracted in con.execute(
                     base + "AND m.is_from_me=0 AND m.is_read=0 AND m.date > ? ORDER BY m.date DESC LIMIT ?",
                     (cutoff, max(limit * 4, 25))):
-                if emit(date, h, fromme, text, blob, contacts, edited, retracted, include_unsent):
-                    n += 1
-                    if n >= limit:
-                        break
+                emit(date, h, fromme, text, blob, contacts, edited, retracted, include_unsent)
+                n += 1
+                if n >= limit:
+                    break
             log.info("unread: %d message(s) within %dd", n, days)
             return
 
@@ -401,19 +480,18 @@ def main():
             limit = parse_limit(args[2] if len(args) > 2 else None)
             n = 0
             for date, fromme, text, blob, h, edited, retracted in con.execute(
-                    "SELECT m.date, m.is_from_me, m.text, m.attributedBody, h.id, "
-                    "m.date_edited, m.date_retracted "
+                    msg_select() +
                     "FROM message m JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
                     "JOIN chat ch ON ch.ROWID = cmj.chat_id "
-                    "LEFT JOIN handle h ON m.handle_id = h.ROWID "
-                    "WHERE COALESCE(m.associated_message_type,0)=0 "
+                    "LEFT JOIN handle h ON m.handle_id = h.ROWID " +
+                    type_where(include_unsent) +
                     "AND (ch.chat_identifier = ? OR ch.room_name = ? OR ch.guid LIKE ?) "
                     "ORDER BY m.date DESC LIMIT ?",
                     (ident, ident, f"%{ident}%", max(limit * 4, limit))):
-                if emit(date, h, fromme, text, blob, contacts, edited, retracted, include_unsent):
-                    n += 1
-                    if n >= limit:
-                        break
+                emit(date, h, fromme, text, blob, contacts, edited, retracted, include_unsent)
+                n += 1
+                if n >= limit:
+                    break
             log.info("chat: %d message(s)", n)
             return
 
@@ -428,7 +506,7 @@ def main():
                 scanned += 1
                 if scanned > scan_cap:
                     break
-                if _is_retracted(retracted) and not include_unsent:
+                if _is_retracted(retracted) and not include_unsent:  # pragma: no cover - SQL already filters
                     continue
                 if _is_retracted(retracted):
                     body = "[unsent]"
