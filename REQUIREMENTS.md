@@ -21,6 +21,7 @@ Hard-rule changes update this register **in the same change**. Docs and PR text 
 | **R-REL-01** | Contact name resolution caches under `~/.cache/imessage-search/` and invalidates on AddressBook mtime. | Mike Lingle | Re-scanning multi-MB AddressBook sources on every call is wasteful and increases contention surface. | `load_contacts` cache path + tests |
 | **R-REL-02** | Body output is sanitized (control chars / non-characters stripped). | Mike Lingle | Typedstream edge cases emit binary junk that confuses agents and UIs. | `sanitize_body` + tests |
 | **R-TEST-01** | Hermetic tests; **100% statement + branch** coverage on logic modules (`fail_under = 100`). | Mike Lingle | Personal mail/message tools are high-blast-radius; untested branches are silent data loss or accidental send. | `.coveragerc`; CI workflow; `pytest` suite |
+| **R-TEST-02** | iMessage failure modes are battle-tested in a **fake chat.db sandbox** (tapbacks, attachments, replies, plugins) with no real contacts or Apple send. | Mike Lingle | Reliability here means “decoder+filter survive Apple’s taxonomy,” not “Rust binary.” A closed loop finds leaks without messaging real people. | `imessage_sim/` + `python -m imessage_sim.run`; pytest `test_imessage_sim.py` |
 | **R-DIST-01** | Install is one script (`install.sh`) + agent-readable `AGENTS.md` so “paste the repo / install this” works. | Mike Lingle | Non-engineers (and other agents) must not need tribal knowledge to get read/draft working. | `AGENTS.md` playbook; installer verifies FDA + points at `setup` |
 | **R-DIST-02** | PR changes to hard rules update this register in the same change; PRs state Accept-if checks. | Mike Lingle | Future cold readers must recover **why** without the original chat context (Elon Phase-1: no authorless requirements). | This file + PR template; submit discipline in AGENTS |
 
@@ -33,6 +34,7 @@ Hard-rule changes update this register **in the same change**. Docs and PR text 
 | Full `.emlx` body decode for all Mail accounts | DEFER | iCloud bodies covered by IMAP; multi-account MIME is a second product. |
 | OAuth browser login for iCloud | DELETE as approach | Not offered by Apple for IMAP; app-specific password is the real requirement. |
 | Separate secrets per agent (Grok vs Claude) | DELETE | Same Mac user should share Keychain; per-agent secrets create drift. |
+| Native binary / Rust rewrite | DEFER | Packaging after the reader is proven (R-TEST-02). Rust does not find tapback/decode bugs. |
 
 ## Rule-change discipline
 
