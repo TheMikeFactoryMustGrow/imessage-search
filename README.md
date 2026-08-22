@@ -113,6 +113,17 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 100% line + branch coverage enforced.
 
+### iMessage sandbox (no real people, no Apple send)
+
+Fake Messages DB you can write into, then read with the CLI. Tapbacks, attachments, replies, stickers, plugins:
+
+```bash
+python3 -m imessage_sim.run
+# metric: kinds_failed  (0 = every kind passed)
+```
+
+See `imessage_sim/PROGRAM.md` for the experiment loop.
+
 ## Uninstall
 
 ```bash
