@@ -141,6 +141,12 @@ def test_decode_body_no_text_no_blob():
 def test_decode_body_garbage_blob():
     assert m.decode_body(None, b"\x00\x01\x02\x03") is None
 
+def test_sanitize_body_strips_controls_and_nonchars():
+    assert m.sanitize_body("ok\x00\x01text\ufffe") == "oktext"
+    assert m.sanitize_body("￼") is None
+    assert m.sanitize_body(None) is None
+    assert m.sanitize_body("") is None
+
 def test_decode_body_blob_short():
     assert m.decode_body(None, blob("SHORT")) == "Hello from the blob"
 
@@ -219,12 +225,65 @@ def test_load_contacts(tmp_path, monkeypatch):
     broken = tmp_path / "broken.abcddb"; broken.write_bytes(b"not a database")
     missing = tmp_path / "missing.abcddb"
     monkeypatch.setattr(m, "AB_GLOB", [str(missing), str(broken), str(good)])
+    monkeypatch.setattr(m, "CONTACTS_CACHE", str(tmp_path / "contacts-cache.json"))
+    monkeypatch.setattr(m, "CACHE_DIR", str(tmp_path))
     names = m.load_contacts()
     assert names["3179995955"] == "Lindsay Lingle"
     assert names["lindsay@example.com"] == "Lindsay Lingle"
     assert names["5551112222"] == "Bob Phoneonly"       # phone-only record
     assert names["eve@example.com"] == "Eve Emailonly"  # email-only record
     assert "5559999999" not in names                    # empty-name record skipped
+
+
+def test_load_contacts_cache_hit(tmp_path, monkeypatch):
+    good = tmp_path / "good.abcddb"; build_addressbook(str(good))
+    cache = tmp_path / "contacts-cache.json"
+    monkeypatch.setattr(m, "AB_GLOB", [str(good)])
+    monkeypatch.setattr(m, "CONTACTS_CACHE", str(cache))
+    monkeypatch.setattr(m, "CACHE_DIR", str(tmp_path))
+    first = m.load_contacts()
+    assert cache.exists()
+    # Same mtimes → second call must not rebuild (would raise if uncached path ran).
+    monkeypatch.setattr(m, "_load_contacts_uncached", lambda: (_ for _ in ()).throw(AssertionError("cache miss")))
+    second = m.load_contacts()
+    assert second == first
+    assert second["3179995955"] == "Lindsay Lingle"
+
+
+def test_load_contacts_skip_env(monkeypatch):
+    monkeypatch.setenv("IMESSAGE_SEARCH_NO_CONTACTS", "1")
+    assert m.load_contacts() == {}
+
+
+def test_load_contacts_corrupt_cache_falls_back(tmp_path, monkeypatch):
+    good = tmp_path / "good.abcddb"; build_addressbook(str(good))
+    cache = tmp_path / "contacts-cache.json"
+    cache.write_text("{not-json", encoding="utf-8")
+    monkeypatch.setattr(m, "AB_GLOB", [str(good)])
+    monkeypatch.setattr(m, "CONTACTS_CACHE", str(cache))
+    monkeypatch.setattr(m, "CACHE_DIR", str(tmp_path))
+    names = m.load_contacts()
+    assert names["3179995955"] == "Lindsay Lingle"
+
+
+def test_load_contacts_cache_write_failure(tmp_path, monkeypatch):
+    good = tmp_path / "good.abcddb"; build_addressbook(str(good))
+    # Point CACHE_DIR at a file so makedirs/open fails with OSError.
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(m, "AB_GLOB", [str(good)])
+    monkeypatch.setattr(m, "CACHE_DIR", str(blocker))
+    monkeypatch.setattr(m, "CONTACTS_CACHE", str(blocker / "contacts.json"))
+    names = m.load_contacts()
+    assert names["3179995955"] == "Lindsay Lingle"
+
+
+def test_load_contacts_no_sources_skips_cache_write(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "AB_GLOB", [str(tmp_path / "missing.abcddb")])
+    monkeypatch.setattr(m, "CONTACTS_CACHE", str(tmp_path / "c.json"))
+    monkeypatch.setattr(m, "CACHE_DIR", str(tmp_path))
+    assert m.load_contacts() == {}
+    assert not (tmp_path / "c.json").exists()
 
 
 # --- main: argument handling -----------------------------------------------------------------
