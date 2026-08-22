@@ -94,6 +94,17 @@ def test_every_tapback_code_is_documented():
     assert set(TAPBACKS) >= {"loved", "liked", "custom", "sticker_react"}
 
 
+def test_world_edit_and_unsend(tmp_path):
+    w = World(tmp_path / "w.db")
+    mid = w.post(handle="+1", from_me=True, text="orig")
+    w.edit(mid, "new")
+    w.unsend(mid)
+    row = w.con.execute("SELECT text, date_edited, date_retracted FROM message WHERE ROWID=?", (mid,)).fetchone()
+    assert row[0] == "new"
+    assert row[1] is not None and row[2] is not None
+    w.close()
+
+
 def test_attachment_without_text_or_blob_gets_placeholder(tmp_path):
     w = World(tmp_path / "w.db")
     mid = w.post(handle="+1", from_me=True, attachment="/fake/x.jpg")

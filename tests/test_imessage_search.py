@@ -38,7 +38,7 @@ def build_chatdb(path):
         "CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);"
         "CREATE TABLE message (ROWID INTEGER PRIMARY KEY, date INTEGER, is_from_me INTEGER,"
         " is_read INTEGER, text TEXT, attributedBody BLOB, handle_id INTEGER,"
-        " associated_message_type INTEGER);"
+        " associated_message_type INTEGER, date_edited INTEGER, date_retracted INTEGER);"
         "CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, room_name TEXT, guid TEXT);"
         "CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);"
     )
@@ -196,6 +196,68 @@ def test_fmt_shape_and_newline_flattened():
 def test_fmt_none_body():
     out = m.fmt(ns_ago(0), "z@y.com", 0, None, {})
     assert out.endswith("  ")  # empty body
+
+
+def test_fmt_edited_and_unsent():
+    assert "(edited)" in m.fmt(ns_ago(0), "z@y.com", 0, "hi", {}, edited=True)
+    assert m.fmt(ns_ago(0), "z@y.com", 0, "secret", {}, unsent=True).endswith("[unsent]")
+    assert "(edited)" in m.fmt(ns_ago(0), "z@y.com", 0, None, {}, edited=True)
+
+
+def test_emit_hides_retracted(capsys):
+    assert m.emit(ns_ago(0), "z@y.com", 0, "gone", None, {}, None, ns_ago(0), False) is False
+    assert capsys.readouterr().out == ""
+    assert m.emit(ns_ago(0), "z@y.com", 0, "gone", None, {}, None, ns_ago(0), True) is True
+    out = capsys.readouterr().out
+    assert "[unsent]" in out
+    assert "gone" not in out
+
+
+def test_main_include_unsent_and_edited(chatdb, ab, monkeypatch, capsys):
+    # Stamp one existing row as retracted and one as edited.
+    import sqlite3 as _s
+    con = _s.connect(str(chatdb))
+    con.execute("UPDATE message SET date_retracted=? WHERE ROWID=1", (ns_ago(0),))  # "hello from me"
+    con.execute("UPDATE message SET date_edited=? WHERE ROWID=4", (ns_ago(0),))    # "goodbye"
+    con.commit(); con.close()
+    run_main(monkeypatch, "recent", "20")
+    out = capsys.readouterr().out
+    assert "hello from me" not in out
+    assert "(edited)" in out
+    run_main(monkeypatch, "--include-unsent", "recent", "20")
+    out2 = capsys.readouterr().out
+    assert "[unsent]" in out2
+    assert "hello from me" not in out2
+
+
+def test_handle_unread_chat_hit_limit(chatdb, ab, monkeypatch, capsys):
+    import sqlite3 as _s
+    con = _s.connect(str(chatdb))
+    # Retracted rows make emit() return False so the loop continues (branch coverage).
+    con.execute("UPDATE message SET date_retracted=? WHERE ROWID IN (1,2)", (ns_ago(0),))
+    con.executemany("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1,?)", [(4,), (7,)])
+    con.commit(); con.close()
+    run_main(monkeypatch, "handle", "+13179995955", "2")
+    assert len(capsys.readouterr().out.strip().splitlines()) == 2
+    run_main(monkeypatch, "unread", "2")
+    assert len(capsys.readouterr().out.strip().splitlines()) == 2
+    run_main(monkeypatch, "chat", "chat999", "2")
+    assert len(capsys.readouterr().out.strip().splitlines()) == 2
+
+
+def test_text_skips_retracted_and_marks_edited(chatdb, ab, monkeypatch, capsys):
+    import sqlite3 as _s
+    con = _s.connect(str(chatdb))
+    con.execute("UPDATE message SET date_retracted=? WHERE ROWID=1", (ns_ago(0),))  # hello from me
+    con.execute("UPDATE message SET date_edited=? WHERE ROWID=4", (ns_ago(0),))    # goodbye
+    con.commit(); con.close()
+    run_main(monkeypatch, "text", "hello", "10")
+    out = capsys.readouterr().out
+    assert "hello from me" not in out
+    run_main(monkeypatch, "text", "goodbye", "10")
+    assert "(edited)" in capsys.readouterr().out
+    run_main(monkeypatch, "--include-unsent", "text", "unsent", "10")
+    assert "[unsent]" in capsys.readouterr().out
 
 
 # --- parse_limit -----------------------------------------------------------------------------

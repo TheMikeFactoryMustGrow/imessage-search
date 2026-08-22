@@ -196,3 +196,17 @@ class World:
             handle=handle, from_me=from_me, text=label, amt=amt,
             associated_guid=f"p:0/{on_guid}", days_ago=days_ago, chat="dm",
         )
+
+    def edit(self, mid: int, new_text: str) -> None:
+        """Sandbox edit: current body becomes new_text; date_edited stamped."""
+        self.con.execute(
+            "UPDATE message SET text=?, attributedBody=NULL, date_edited=? WHERE ROWID=?",
+            (new_text, ns_ago(0), mid),
+        )
+
+    def unsend(self, mid: int) -> None:
+        """Sandbox unsend: stamp date_retracted. Reader hides the original body."""
+        self.con.execute(
+            "UPDATE message SET date_retracted=? WHERE ROWID=?",
+            (ns_ago(0), mid),
+        )

@@ -30,6 +30,7 @@ USAGE:
   imessage-search chat   "<chat id / room>" [limit]      # messages in a group thread (by chat_identifier)
   imessage-search contacts "<name>"                      # name -> phone/email (all sources)
 Defaults: limit 40. `text` scans newest-first up to 80000 rows; pass --all to scan everything.
+Edited messages append " (edited)". Unsent/retracted rows are hidden; pass --include-unsent to list them as [unsent] (original body is never printed).
 
 LOGGING: add -v (info) / -vv (debug) / -q (errors only), or set IMESSAGE_SEARCH_LOG=DEBUG.
 Logs go to stderr (results stay on stdout) and NEVER include message text, search terms,
@@ -244,11 +245,31 @@ def who(handle, is_from_me, contacts):
     return contacts.get(key, handle)
 
 
-def fmt(date, handle, is_from_me, body, contacts):
+def fmt(date, handle, is_from_me, body, contacts, *, edited=False, unsent=False):
     import datetime
     ts = datetime.datetime.fromtimestamp(apple_ts(date)).strftime("%Y-%m-%d %H:%M")
-    body = (body or "").replace("\n", " ").replace("\r", " ")
+    if unsent:
+        body = "[unsent]"
+    else:
+        body = (body or "").replace("\n", " ").replace("\r", " ")
+        if edited:
+            body = f"{body} (edited)" if body else "(edited)"
     return f"{ts}  {who(handle, is_from_me, contacts):<22.22}  {body}"
+
+
+def _is_retracted(val):
+    """date_retracted is ns-since-2001 when set; 0/NULL means still present."""
+    return bool(val)
+
+
+def emit(date, handle, is_from_me, text, blob, contacts, edited, retracted, include_unsent):
+    """Print one row. Returns True if printed. Retracted rows are hidden unless include_unsent."""
+    if _is_retracted(retracted) and not include_unsent:
+        return False
+    print(fmt(date, handle, is_from_me, decode_body(text, blob), contacts,
+              edited=_is_retracted(edited) and not _is_retracted(retracted),
+              unsent=_is_retracted(retracted)))
+    return True
 
 
 FDA_HINT = ("Cannot read ~/Library/Messages/chat.db — most likely the app running this lacks "
@@ -280,6 +301,10 @@ def connect_chatdb():
 def main():
     args = sys.argv[1:]
     _setup_logging(_resolve_log_level(args))
+    include_unsent = False
+    if "--include-unsent" in args:
+        args.remove("--include-unsent")
+        include_unsent = True
     if not args:
         sys.exit(__doc__)
     cmd = args[0]
@@ -322,16 +347,23 @@ def main():
 
     with closing(connect_chatdb()) as con:
         contacts = load_contacts()
-        base = ("SELECT m.date, m.is_from_me, m.text, m.attributedBody, h.id "
+        # Tapbacks/reactions (type != 0) stay out. Retracted/unsent filtered in emit()
+        # unless --include-unsent (then shown as [unsent], never the original body).
+        base = ("SELECT m.date, m.is_from_me, m.text, m.attributedBody, h.id, "
+                "m.date_edited, m.date_retracted "
                 "FROM message m LEFT JOIN handle h ON m.handle_id = h.ROWID "
-                "WHERE COALESCE(m.associated_message_type,0) = 0 ")  # exclude tapbacks/reactions
+                "WHERE COALESCE(m.associated_message_type,0) = 0 ")
 
         if cmd == "recent":
             limit = parse_limit(args[1] if len(args) > 1 else None)
             n = 0
-            for date, fromme, text, blob, h in con.execute(base + "ORDER BY m.date DESC LIMIT ?", (limit,)):
-                print(fmt(date, h, fromme, decode_body(text, blob), contacts))
-                n += 1
+            # Over-fetch a bit so hidden unsends don't shrink the visible window to 0.
+            for date, fromme, text, blob, h, edited, retracted in con.execute(
+                    base + "ORDER BY m.date DESC LIMIT ?", (max(limit * 4, limit),)):
+                if emit(date, h, fromme, text, blob, contacts, edited, retracted, include_unsent):
+                    n += 1
+                    if n >= limit:
+                        break
             log.info("recent: %d message(s)", n)
             return
 
@@ -339,10 +371,12 @@ def main():
             h = args[1] if len(args) > 1 else sys.exit("need a phone/email")
             limit = parse_limit(args[2] if len(args) > 2 else None)
             n = 0
-            for date, fromme, text, blob, hid in con.execute(
-                    base + "AND h.id LIKE ? ORDER BY m.date DESC LIMIT ?", (f"%{h}%", limit)):
-                print(fmt(date, hid, fromme, decode_body(text, blob), contacts))
-                n += 1
+            for date, fromme, text, blob, hid, edited, retracted in con.execute(
+                    base + "AND h.id LIKE ? ORDER BY m.date DESC LIMIT ?", (f"%{h}%", max(limit * 4, limit))):
+                if emit(date, hid, fromme, text, blob, contacts, edited, retracted, include_unsent):
+                    n += 1
+                    if n >= limit:
+                        break
             log.info("handle: %d message(s)", n)
             return
 
@@ -352,11 +386,13 @@ def main():
             days = parse_limit(rest[1] if len(rest) > 1 else None, 14)
             cutoff = int((time.time() - days * 86400 - 978307200) * 1_000_000_000)   # ns-since-2001 boundary
             n = 0
-            for date, fromme, text, blob, h in con.execute(
+            for date, fromme, text, blob, h, edited, retracted in con.execute(
                     base + "AND m.is_from_me=0 AND m.is_read=0 AND m.date > ? ORDER BY m.date DESC LIMIT ?",
-                    (cutoff, limit)):
-                print(fmt(date, h, fromme, decode_body(text, blob), contacts))
-                n += 1
+                    (cutoff, max(limit * 4, 25))):
+                if emit(date, h, fromme, text, blob, contacts, edited, retracted, include_unsent):
+                    n += 1
+                    if n >= limit:
+                        break
             log.info("unread: %d message(s) within %dd", n, days)
             return
 
@@ -364,17 +400,20 @@ def main():
             ident = args[1] if len(args) > 1 else sys.exit("need a chat identifier (chat_identifier / room name)")
             limit = parse_limit(args[2] if len(args) > 2 else None)
             n = 0
-            for date, fromme, text, blob, h in con.execute(
-                    "SELECT m.date, m.is_from_me, m.text, m.attributedBody, h.id "
+            for date, fromme, text, blob, h, edited, retracted in con.execute(
+                    "SELECT m.date, m.is_from_me, m.text, m.attributedBody, h.id, "
+                    "m.date_edited, m.date_retracted "
                     "FROM message m JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
                     "JOIN chat ch ON ch.ROWID = cmj.chat_id "
                     "LEFT JOIN handle h ON m.handle_id = h.ROWID "
                     "WHERE COALESCE(m.associated_message_type,0)=0 "
                     "AND (ch.chat_identifier = ? OR ch.room_name = ? OR ch.guid LIKE ?) "
                     "ORDER BY m.date DESC LIMIT ?",
-                    (ident, ident, f"%{ident}%", limit)):
-                print(fmt(date, h, fromme, decode_body(text, blob), contacts))
-                n += 1
+                    (ident, ident, f"%{ident}%", max(limit * 4, limit))):
+                if emit(date, h, fromme, text, blob, contacts, edited, retracted, include_unsent):
+                    n += 1
+                    if n >= limit:
+                        break
             log.info("chat: %d message(s)", n)
             return
 
@@ -385,11 +424,18 @@ def main():
             limit = parse_limit(rest[0] if rest else None)
             scan_cap = 10**9 if "--all" in flags else TEXT_SCAN_CAP   # flags only — never mistake the term for --all
             matches = scanned = 0
-            for date, fromme, text, blob, h in con.execute(base + "ORDER BY m.date DESC"):
+            for date, fromme, text, blob, h, edited, retracted in con.execute(base + "ORDER BY m.date DESC"):
                 scanned += 1
                 if scanned > scan_cap:
                     break
-                body = decode_body(text, blob)
+                if _is_retracted(retracted) and not include_unsent:
+                    continue
+                if _is_retracted(retracted):
+                    body = "[unsent]"
+                else:
+                    body = decode_body(text, blob)
+                    if _is_retracted(edited) and body:
+                        body = f"{body} (edited)"
                 if body and term in body.lower():
                     if matches >= limit:                      # check before printing so limit 0 yields 0 rows
                         break

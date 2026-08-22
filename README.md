@@ -115,7 +115,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 ### iMessage sandbox (no real people, no Apple send)
 
-Fake Messages DB you can write into, then read with the CLI. Tapbacks, attachments, replies, stickers, plugins:
+Fake Messages DB you can write into, then read with the CLI. Tapbacks, attachments, replies, **edits**, **unsends**, stickers, plugins:
 
 ```bash
 python3 -m imessage_sim.run

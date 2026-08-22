@@ -31,7 +31,8 @@ No network. No `~/Library/Messages`. No accidental SMS.
 
 ## Hard rules (REQUIREMENTS.md)
 
-- R-SAFE-01: this tool does not send. The sandbox `World.post(..., from_me=True)` only INSERTs into a temp DB.
+- R-SAFE-01: this tool does not send. The sandbox `World.post` / `World.edit` / `World.unsend` only mutate a temp DB.
+- Edited messages must show current text plus ` (edited)`. Unsent (`date_retracted`) must not leak the original body.
 - R-SAFE-05: no AppleScript.
 - R-TEST-01: hermetic pytest still 100% coverage.
 

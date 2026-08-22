@@ -73,7 +73,13 @@ def _group_chat(w: World) -> None:
 
 
 def _edited(w: World) -> None:
-    w.post(handle="+15551110009", from_me=True, text="edited later", edited=True, days_ago=0)
+    mid = w.post(handle="+15551110009", from_me=True, text="original draft", days_ago=0.1)
+    w.edit(mid, "edited later")
+
+
+def _unsent(w: World) -> None:
+    mid = w.post(handle="+15551110019", from_me=True, text="oops should vanish", days_ago=0)
+    w.unsend(mid)
 
 
 def _all_tapbacks(w: World) -> None:
@@ -130,7 +136,8 @@ KINDS: tuple[Kind, ...] = (
     Kind("attachment_placeholder", _attachment_then_removed_caption, ("[attachment]",), (), "U+FFFC-only text"),
     Kind("reply_thread", _reply_thread, ("original question", "threaded reply"), (), "reply_to_guid still type 0"),
     Kind("group_chat", _group_chat, ("group hello",), (), "chat_identifier join"),
-    Kind("edited", _edited, ("edited later",), (), "date_edited set; still visible"),
+    Kind("edited", _edited, ("edited later", "(edited)"), ("original draft",), "edit keeps current text + marker"),
+    Kind("unsent", _unsent, (), ("oops should vanish",), "unsend hides original body"),
     Kind(
         "all_tapbacks", _all_tapbacks, ("tapback target",),
         ("Loved", "Liked", "Disliked", "Laughed", "Emphasized", "Questioned", "Reacted", "sticker"),
