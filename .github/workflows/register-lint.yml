@@ -1,0 +1,14 @@
+name: register-lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  register-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint REQUIREMENTS.md register structure
+        run: python3 scripts/register_lint.py

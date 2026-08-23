@@ -220,3 +220,10 @@ papercut -m <model> "what you were doing → what got in the way"
 
 Data: `.agent-papercuts/`. Sand with skill **papercuts**.
 <!-- agent-papercuts:end -->
+
+## Submit discipline (R-DIST-02)
+
+Draft = still working. **Ready-for-review is the done-signal**, flipped by the
+authoring session itself the moment the PR's Accept-if checks pass (CI green
+where CI applies) — never left to a human. Verified work sitting in draft
+stalls the merge loop.
