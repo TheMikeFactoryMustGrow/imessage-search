@@ -10,6 +10,8 @@
 
 -
 
+**Supersedes / relates to:** <!-- PR #s, RCAs, rulings that led here — "none" if standalone -->
+
 ## Problem / opportunity
 
 <!-- What was wrong, missing, or costly *before* this PR? Who felt it? -->
@@ -33,6 +35,12 @@
 
 -
 
+## Requirements touched
+
+<!-- REQUIREMENTS.md IDs this PR affects, adds, or relies on — "none" if none. Hard-rule changes update the register in the same PR. -->
+
+-
+
 ## How to evaluate this update
 
 **Accept if:**
@@ -50,6 +58,12 @@
 - [ ] Default send is enabled without dual gate
 - [ ] Personal email hardcodes return for shared install
 
+**Manual / scripted checks run:**
+
+```text
+# commands run + results
+```
+
 ## Impact surface
 
 - [ ] `imessage_search.py` (local Messages)
@@ -58,6 +72,8 @@
 - [ ] `install.sh` / launchers
 - [ ] `AGENTS.md` / `README.md` / `REQUIREMENTS.md`
 - [ ] Tests / CI
+
+**Blast radius (one line):**
 
 ## Risk & rollback
 
